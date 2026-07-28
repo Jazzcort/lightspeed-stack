@@ -18,7 +18,13 @@ from pydantic_ai import AgentRunResult, RunContext
 from pydantic_ai._agent_graph import GraphAgentState
 from pydantic_ai.capabilities import AbstractCapability, WrapRunHandler
 from pydantic_ai.direct import model_request
-from pydantic_ai.messages import ModelRequest, TextContent, UserContent
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    TextContent,
+    TextPart,
+    UserContent,
+)
 from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIResponsesModelSettings
 
@@ -28,6 +34,7 @@ from models.config import (
     QuestionValidityConfig,
 )
 from pydantic_ai_lightspeed.llamastack import LlamaStackResponsesModel
+from utils.shields import append_turn_to_conversation
 
 logger = get_logger(__name__)
 
@@ -136,7 +143,36 @@ class QuestionValidity(AbstractCapability[None]):
             return await handler()  # proceed with the real run
 
         # short-circuit: return the rejection message with shield usage tracked
-        state = GraphAgentState(usage=ctx.usage)
+        state = GraphAgentState(
+            usage=ctx.usage,
+            message_history=[
+                ModelRequest.user_text_prompt(prompt),
+                ModelResponse(
+                    [TextPart(self.config.invalid_question_response)],
+                    finish_reason="stop",
+                ),
+            ],
+        )
+        client = AsyncLlamaStackClientHolder().get_client()
+        try:
+            match ctx.prompt:
+                case str() as s:
+                    _message = s
+                case Sequence() as seq:
+                    _message = _extract_message_str_from_user_content(seq)
+                case None:
+                    _message = ""
+
+            await append_turn_to_conversation(
+                client,
+                ctx.model.settings.get("extra_body").get("conversation"),
+                _message,
+                self.config.invalid_question_response,
+            )
+        except:
+            pass
+
         return AgentRunResult(
-            output=self.config.invalid_question_response, _state=state
+            output=self.config.invalid_question_response,
+            _state=state,
         )

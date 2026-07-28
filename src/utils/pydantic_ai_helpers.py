@@ -12,7 +12,8 @@ from pydantic_ai.capabilities import AbstractCapability, AgentCapability
 from pydantic_ai_skills import SkillsCapability
 
 from models.common.responses.responses_api_params import ResponsesApiParams
-from models.config import SkillsConfiguration
+from models.config import QuestionValidityConfig, SkillsConfiguration
+from pydantic_ai_lightspeed.capabilities import QuestionValidity
 from pydantic_ai_lightspeed.llamastack import (
     LlamaStackResponsesModel,
 )
@@ -181,6 +182,15 @@ def build_agent(
     """
     capabilities = _agent_capabilities(skills, no_tools=no_tools)
 
+    _capabilities = []
+    if capabilities:
+        _capabilities.extend(capabilities)
+
+    qv_config = QuestionValidityConfig(model_id="openai/gpt-4o-mini")
+    qv = QuestionValidity(qv_config)
+
+    _capabilities.append(qv)
+
     model = LlamaStackResponsesModel.from_llama_stack_client(
         responses_params.model, client, responses_params=responses_params
     )
@@ -188,6 +198,6 @@ def build_agent(
     return Agent(
         model,
         instructions=responses_params.instructions,
-        capabilities=capabilities,
+        capabilities=_capabilities,
         defer_model_check=True,
     )
