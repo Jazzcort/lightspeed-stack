@@ -4,7 +4,7 @@
 
 import os
 import re
-from enum import Enum
+from enum import Enum, StrEnum
 from functools import cached_property
 from pathlib import Path
 from re import Pattern
@@ -2422,8 +2422,7 @@ class VectorStoreConfiguration(ConfigurationBase):
 
         if self.default_provider is None:
             raise ValueError(
-                "vector_store.default_provider is required when providers "
-                "is non-empty"
+                "vector_store.default_provider is required when providers is non-empty"
             )
 
         ids = [provider.id for provider in self.providers]
@@ -3142,6 +3141,12 @@ class RedactionShieldConfiguration(ConfigurationBase):
     )
 
 
+class GuardrailPoint(StrEnum):
+    INPUT = "input"
+    OUTPUT = "output"
+    TOOL = "tool"
+
+
 class RiskDefinition(ConfigurationBase):
     """
     Definition for a custom risk category.
@@ -3197,7 +3202,7 @@ class RiskDefinition(ConfigurationBase):
             "reasoning before scoring."
         ),
     )
-    points: list[Literal["input", "output", "tool"]] = Field(
+    points: list[GuardrailPoint] = Field(
         ...,
         min_length=1,
         title="Guardrail points",
