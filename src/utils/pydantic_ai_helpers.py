@@ -16,12 +16,16 @@ from models.common.responses.responses_api_params import ResponsesApiParams
 from models.common.skills import SkillMetadata
 from models.common.tools import CatalogTool, CatalogToolParameter
 from models.config import (
+    GraniteGuardianConfig,
     QuestionValidityConfig,
     RedactionConfig,
     ShieldConfiguration,
     SkillsConfiguration,
 )
 from pydantic_ai_lightspeed.capabilities import QuestionValidity
+from pydantic_ai_lightspeed.capabilities.granite_guardian._capability import (
+    GraniteGuardian,
+)
 from pydantic_ai_lightspeed.capabilities.redaction import PiiRedactionCapability
 from pydantic_ai_lightspeed.llamastack import OgxResponsesModel
 from utils.shields import get_shields_for_request
@@ -174,6 +178,8 @@ def _shield_capability(shield: ShieldConfiguration) -> AgentCapability[object]:
             return QuestionValidity(config=shield.config)
         case RedactionConfig():
             return PiiRedactionCapability(config=shield.config)
+        case GraniteGuardianConfig():
+            return GraniteGuardian(config=shield.config)
         case _:
             raise ValueError(
                 f"Unsupported shield config type for shield '{shield.name}': "

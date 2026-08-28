@@ -31,3 +31,21 @@ conversation_cache:
 authentication:
   module: "noop"
 
+shields:
+  - name: granite-guardian
+    provider_id: granite_guardian
+    config:
+      url: https://granite-guardian-4-1-8b--apicast-production.apps.int.stc.ai.prod.us-east-1.aws.paas.redhat.com/v1
+      api_key: dummy
+      verify_ssl: false
+      risks:
+        - name: harm
+          # enabled: false
+          description: >-
+            Texts deemed universally harmful are those that pose harm across all
+            contexts and audiences, except when the message is a technical question
+            about a CVE (Common Vulnerabilities and Exposures).
+  # - name: question-validity
+  #   provider_id: question_validity
+  #   config:
+  #     model_id: openai/gpt-4o-mini
