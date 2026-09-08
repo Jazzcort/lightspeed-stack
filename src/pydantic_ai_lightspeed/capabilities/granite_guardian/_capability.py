@@ -1,5 +1,7 @@
 """Granite Guardian safety capability for input/output guardrail moderation."""
 
+from collections import deque
+from collections.abc import AsyncIterable
 from dataclasses import dataclass, field
 from typing import Optional
 from uuid import uuid4
@@ -11,9 +13,14 @@ from pydantic_ai.capabilities import WrapRunHandler
 from pydantic_ai.direct import model_request
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import (
+    AgentStreamEvent,
     ModelRequest,
     ModelResponse,
+    PartDeltaEvent,
+    PartEndEvent,
+    PartStartEvent,
     TextPart,
+    TextPartDelta,
 )
 from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
@@ -211,6 +218,83 @@ class GraniteGuardian(AbstractSafetyCapability):
         agent_result = await handler()  # proceed with the real run
 
         return agent_result
+
+    async def wrap_run_event_stream(
+        self, ctx: RunContext, *, stream: AsyncIterable[AgentStreamEvent]
+    ) -> AsyncIterable[AgentStreamEvent]:
+        max_length = 80
+        buffer_length = 50
+        event_sliding_window: deque[tuple[int, str]] = deque()
+        active_index = 0
+
+        output_guardrails = _filter_guardrails(self.config.risks, GuardrailPoint.OUTPUT)
+
+        async for event in stream:
+
+            match event:
+                case PartStartEvent():
+                    active_index = event.index
+
+                case PartEndEvent():
+                    violate_message, _ = await _run_risk_check(
+                        "".join([e[1] for e in event_sliding_window]),
+                        self._model,
+                        output_guardrails,
+                    )
+
+                    if violate_message is not None:
+                        yield PartDeltaEvent(
+                            index=active_index + 1,
+                            delta=TextPartDelta(violate_message),
+                        )
+                        yield PartEndEvent(
+                            index=active_index + 2,
+                            part=TextPart(violate_message),
+                        )
+                    else:
+                        while len(event_sliding_window) > 0:
+                            index, text = event_sliding_window.popleft()
+                            active_index = index
+                            yield PartDeltaEvent(index=index, delta=TextPartDelta(text))
+                        yield event
+
+                case PartDeltaEvent():
+                    if isinstance(event.delta, TextPartDelta):
+
+                        event_sliding_window.append(
+                            (event.index, event.delta.content_delta)
+                        )
+
+                        if len(event_sliding_window) > max_length:
+                            violate_message, _ = await _run_risk_check(
+                                "".join([e[1] for e in event_sliding_window]),
+                                self._model,
+                                output_guardrails,
+                            )
+
+                            logger.info("--------Verify window--------")
+                            logger.info("".join([e[1] for e in event_sliding_window]))
+                            logger.info("--------Verify window--------")
+
+                            if violate_message is not None:
+                                yield PartDeltaEvent(
+                                    index=active_index + 1,
+                                    delta=TextPartDelta(violate_message),
+                                )
+                                yield PartEndEvent(
+                                    index=active_index + 2,
+                                    part=TextPart(violate_message),
+                                )
+                                return
+                            else:
+                                while len(event_sliding_window) > buffer_length:
+                                    index, text = event_sliding_window.popleft()
+                                    active_index = index
+                                    yield PartDeltaEvent(
+                                        index=index, delta=TextPartDelta(text)
+                                    )
+                case _:
+                    yield event
 
     async def run(self, input_text: str) -> ShieldModerationResult:
         """Run standalone shield moderation on the given text.
