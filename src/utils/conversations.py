@@ -642,3 +642,29 @@ async def append_turn_to_conversation(
 
         error_response = InternalServerErrorResponse.generic()
         raise HTTPException(**error_response.model_dump()) from e
+
+
+async def delete_conversation_item(
+    client: AsyncOgxClient, conversation_id: str, item_id: str
+) -> None:
+    """Delete a single item from an OGX conversation.
+
+    Parameters:
+        client: The OGX client to use for the deletion.
+        conversation_id: The conversation containing the item.
+        item_id: The ID of the item to delete.
+
+    Raises:
+        HTTPException: 503 when OGX is unreachable, 500 for other API errors.
+    """
+    try:
+        await client.items.delete(conversation_id, item_id)
+    except ApiException as e:
+        if not e.status:
+            error_response = ServiceUnavailableResponse(
+                backend_name="OGX",
+            )
+            raise HTTPException(**error_response.model_dump()) from e
+
+        error_response = InternalServerErrorResponse.generic()
+        raise HTTPException(**error_response.model_dump()) from e

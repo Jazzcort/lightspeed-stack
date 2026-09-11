@@ -3,8 +3,13 @@
 from collections.abc import Sequence
 from typing import Optional
 
+from openai.types.responses import ResponseOutputMessage
 from pydantic_ai.messages import TextContent, UserContent
 from pydantic_ai.models import Model
+
+from log import get_logger
+
+logger = get_logger(__name__)
 
 
 def extract_message_str_from_user_content(
@@ -67,3 +72,27 @@ def extract_conversation_id(model: Model) -> Optional[str]:
 
     conversation_id = extra_body.get("conversation")
     return conversation_id if isinstance(conversation_id, str) else None
+
+
+def extract_last_message_items(model: Model) -> Optional[list[ResponseOutputMessage]]:
+    """Extract the output items captured from the last OGX response.
+
+    Retrieves the ``last_output_items`` attribute from the model, which
+    contains the structured output items (including their IDs) that OGX
+    persisted during inference. Used by output guardrails to identify and
+    replace conversation items when a violation is detected.
+
+    Parameters:
+        model: The pydantic-ai model, expected to be an ``OgxResponsesModel``
+            that captures output items from OGX responses.
+
+    Returns:
+        The list of output message items, or ``None`` when the model did not
+        capture any (e.g. a non-OGX model or a test double).
+    """
+    last_output_items = getattr(model, "last_output_items", None)
+
+    if not isinstance(last_output_items, list):
+        return None
+
+    return last_output_items

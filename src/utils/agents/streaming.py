@@ -9,8 +9,10 @@ import datetime
 from collections.abc import AsyncIterator
 from functools import singledispatch
 from typing import Any, Final, Optional
+from uuid import uuid4
 
 from fastapi import HTTPException
+from ogx_api.openai_responses import OpenAIResponseMessage
 from ogx_client import ApiException
 from opentelemetry import trace
 from pydantic_ai import Agent, AgentRunError, AgentRunResultEvent, ToolReturnPart
@@ -460,6 +462,21 @@ async def agent_response_generator(
         return
 
     run_result = dispatch_state.run_result
+
+    # Need to replace the output_items so in compaction mode we persist the violation
+    # message instead of the blocked content
+    raw_text = run_result.response.text or "".join(dispatch_state.text_parts)
+    if run_result.output != raw_text:
+        turn_summary.output_items = [
+            OpenAIResponseMessage(
+                content=run_result.output,
+                role="assistant",
+                status="completed",
+                type="message",
+                id=f"msg_{uuid4()}",
+            ),
+        ]
+
     turn_summary.token_usage = extract_agent_token_usage(
         run_result.usage,
         responses_params.model,
@@ -558,7 +575,8 @@ def _(
             provider_details.get("refusal_response") or DEFAULT_REFUSAL_RESPONSE
         )
     else:
-        final_text = state.run_result.response.text or "".join(state.text_parts)
+        # output should be the source of truth
+        final_text = state.run_result.output or "".join(state.text_parts)
 
     payload = TurnCompleteStreamPayload.create(
         chunk_id=state.chunk_id,
