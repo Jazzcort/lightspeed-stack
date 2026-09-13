@@ -189,6 +189,7 @@ def make_agent_run_result_fixture(mocker: MockerFixture) -> Callable[..., Any]:
         )
         run_result = mocker.MagicMock()
         run_result.response = model_response
+        run_result.output = content
         run_result.usage = RunUsage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,

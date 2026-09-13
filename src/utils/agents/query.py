@@ -208,6 +208,10 @@ def build_turn_summary_from_agent_run(
                 if isinstance(request_part, ToolReturnPart):
                     process_function_tool_result(state, request_part)
 
+    # Output should be the source of truth
+    if run_result.output:
+        state.turn_summary.llm_response = run_result.output
+
     # Add tool execution attributes to current span (parent llm.inference span)
     current_span = trace.get_current_span()
     if current_span.is_recording() and tool_call_names:

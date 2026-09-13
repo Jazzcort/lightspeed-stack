@@ -2301,6 +2301,7 @@ class TestSanitizesOutputAndModel:
         mock_config.mcp_servers = [mcp_server]
         mock_config.quota_limiters = minimal_config.quota_limiters
         mock_config.rag_id_mapping = {}
+        mock_config.configuration.shields = None
 
         original_request = ResponsesRequest(input="Hi")
         updated_request = ResponsesRequest(

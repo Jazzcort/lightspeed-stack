@@ -61,6 +61,7 @@ def make_agent_run_result_fixture(mocker: MockerFixture) -> Callable[..., Any]:
             )
         messages = new_messages if new_messages is not None else [model_response]
         run_result = mocker.MagicMock()
+        run_result.output = model_response.text or content
         run_result.response = model_response
         run_result.usage = RunUsage(
             input_tokens=input_tokens,

@@ -111,7 +111,10 @@ from utils.responses import (
     select_model_for_responses,
 )
 from utils.rh_identity import get_rh_identity_context
-from utils.shields import run_shield_moderation_v2
+from utils.shields import (
+    apply_output_guardrails_to_stream,
+    run_shield_moderation_v2,
+)
 from utils.suid import (
     normalize_conversation_id,
 )
@@ -814,8 +817,17 @@ async def handle_streaming_response(
                     exclude_none=True, exclude={"safety_identifier"}
                 )
             )
+            stream: AsyncIterator[OpenAIResponseObjectStream] = cast(
+                AsyncIterator[OpenAIResponseObjectStream], response
+            )
+
+            if configuration.configuration.shields:
+                stream = apply_output_guardrails_to_stream(
+                    stream, configuration.configuration.shields
+                )
+
             generator = response_generator(
-                stream=cast(AsyncIterator[OpenAIResponseObjectStream], response),
+                stream=stream,
                 original_request=original_request,
                 api_params=api_params,
                 context=context,
@@ -1375,6 +1387,17 @@ async def handle_non_streaming_response(
                 token_usage=token_usage,
             )
             output_text = extract_text_from_response_items(api_response.output)
+
+            if configuration.configuration.shields:
+                output_moderation = await run_shield_moderation_v2(
+                    output_text,
+                    configuration.configuration.shields,
+                    guardrail_point="output",
+                )
+                if output_moderation.decision == "blocked":
+                    output_text = output_moderation.message
+                    api_response.output = [output_moderation.refusal_response]
+
             # Explicitly append the turn to conversation if context passed by previous response
             await _append_previous_response_turn(
                 api_params,

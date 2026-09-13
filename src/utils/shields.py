@@ -1,9 +1,18 @@
 """Utility helpers for shield override validation and moderation."""
 
 import uuid
+from collections import deque
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Optional
 
 from fastapi import HTTPException
+from ogx_api import OpenAIResponseObjectStream
+from ogx_api import (
+    OpenAIResponseObjectStreamResponseOutputTextDelta as OutputTextDeltaChunk,
+)
+from ogx_api import (
+    OpenAIResponseObjectStreamResponseOutputTextDone as OutputTextDoneChunk,
+)
 from ogx_client import AsyncOgxClient
 from opentelemetry import trace
 from pydantic_ai.exceptions import AgentRunError
@@ -23,11 +32,15 @@ from models.common.moderation import (
 )
 from models.config import (
     GraniteGuardianConfig,
+    GuardrailPoint,
     QuestionValidityConfig,
     RedactionConfig,
     ShieldConfiguration,
 )
 from pydantic_ai_lightspeed.capabilities.base import AbstractSafetyCapability
+from pydantic_ai_lightspeed.capabilities.granite_guardian import (
+    GraniteGuardian,
+)
 from pydantic_ai_lightspeed.capabilities.question_validity._capability import (
     QuestionValidity,
 )
@@ -82,6 +95,7 @@ async def run_shield_moderation_v2(
     input_text: str,
     shield_configs: list[ShieldConfiguration],
     selected_shield_ids: Optional[list[str]] = None,
+    guardrail_point: GuardrailPoint = "input",
 ) -> ShieldModerationResult:
     """Run v2 shield moderation on input text.
 
@@ -119,8 +133,19 @@ async def run_shield_moderation_v2(
             shield_configs, selected_shield_ids
         )
 
-        for shield_config in selected_shield_configs:
-            shield = build_shield(shield_config)
+        # Currently only Granite Guardian guardrail is used to protect output
+        shield_configs_filtered_by_guardrail_point = (
+            selected_shield_configs
+            if guardrail_point == "input"
+            else [
+                config
+                for config in selected_shield_configs
+                if isinstance(config.config, GraniteGuardianConfig)
+            ]
+        )
+
+        for shield_config in shield_configs_filtered_by_guardrail_point:
+            shield = build_shield(shield_config, guardrail_point)
 
             try:
                 shield_result = await shield.run(input_text)
@@ -149,7 +174,121 @@ async def run_shield_moderation_v2(
         return ShieldModerationPassed()
 
 
-def build_shield(shield_config: ShieldConfiguration) -> AbstractSafetyCapability:
+async def _check_and_drain_ogx_buffer(
+    event_sliding_window: deque[OutputTextDeltaChunk],
+    shield_configs: list[ShieldConfiguration],
+    buffer_threshold: int,
+) -> AsyncGenerator[OutputTextDeltaChunk | OutputTextDoneChunk, None]:
+    """Run an output guardrail risk check on buffered OGX text deltas.
+
+    Joins the buffered text and calls ``run_shield_moderation_v2`` with
+    ``GuardrailPoint.OUTPUT`` to evaluate it.  On violation, yields a delta
+    and done chunk containing the violation message.  On pass, drains the
+    buffer down to ``buffer_threshold``, yielding each released chunk.
+
+    Parameters:
+        event_sliding_window: Buffer of accumulated OutputTextDelta chunks.
+        shield_configs: Configured shield definitions to evaluate against.
+        buffer_threshold: Drain the window down to this size on pass.
+
+    Yields:
+        Buffered OutputTextDeltaChunk on pass, or an OutputTextDeltaChunk +
+        OutputTextDoneChunk with the violation message when blocked.
+    """
+    accumulated_text = "".join(chunk.delta for chunk in event_sliding_window)
+    result = await run_shield_moderation_v2(
+        accumulated_text,
+        shield_configs,
+        guardrail_point="output",
+    )
+
+    if result.decision == "blocked":
+        blocked_result: ShieldModerationBlocked = result  # type: ignore[assignment]
+        last = event_sliding_window[-1]
+        yield OutputTextDeltaChunk(
+            content_index=last.content_index,
+            delta=blocked_result.message,
+            item_id=last.item_id,
+            output_index=last.output_index,
+            sequence_number=last.sequence_number,
+        )
+        yield OutputTextDoneChunk(
+            content_index=last.content_index,
+            text=blocked_result.message,
+            item_id=last.item_id,
+            output_index=last.output_index,
+            sequence_number=last.sequence_number + 1,
+        )
+    else:
+        while len(event_sliding_window) > buffer_threshold:
+            yield event_sliding_window.popleft()
+
+
+async def apply_output_guardrails_to_stream(
+    stream: AsyncIterator[OpenAIResponseObjectStream],
+    shield_configs: list[ShieldConfiguration],
+    sliding_window_capacity: int = 80,
+    buffer_threshold: int = 50,
+) -> AsyncGenerator[OpenAIResponseObjectStream, None]:
+    """Wrap an OGX Responses API stream with output guardrail checks.
+
+    Buffers ``response.output_text.delta`` chunks in a sliding window and
+    periodically calls ``run_shield_moderation_v2`` with OUTPUT guardrail
+    point to evaluate the accumulated text.  Non-text chunks pass through
+    immediately.  When a violation is detected the buffered text is replaced
+    with the violation message and the stream is terminated.
+
+    Parameters:
+        stream: The raw OGX streaming response iterator.
+        shield_configs: Configured shield definitions to evaluate against.
+        sliding_window_capacity: Trigger a risk check when the buffer exceeds
+            this many items.
+        buffer_threshold: After a passing check, drain the buffer to this size.
+
+    Yields:
+        OGX stream chunks, with text deltas buffered and checked.
+    """
+    event_sliding_window: deque[OutputTextDeltaChunk] = deque()
+
+    async for chunk in stream:
+        if chunk.type == "response.output_text.delta":
+            event_sliding_window.append(chunk)  # type: ignore[arg-type]
+
+            if len(event_sliding_window) > sliding_window_capacity:
+                async for verified_chunk in _check_and_drain_ogx_buffer(
+                    event_sliding_window,
+                    shield_configs,
+                    buffer_threshold,
+                ):
+                    yield verified_chunk
+
+                    if verified_chunk.type == "response.output_text.done":
+                        return
+
+        elif chunk.type in (
+            "response.output_text.done",
+            "response.content_part.done",
+        ):
+            async for verified_chunk in _check_and_drain_ogx_buffer(
+                event_sliding_window,
+                shield_configs,
+                0,
+            ):
+                yield verified_chunk
+
+                if verified_chunk.type == "response.output_text.done":
+                    return
+
+            yield chunk
+
+        else:
+            yield chunk
+
+
+def build_shield(
+    shield_config: ShieldConfiguration,
+    guardrail_point: GuardrailPoint = "input",
+) -> AbstractSafetyCapability:
     """Build a safety capability instance from a shield configuration.
 
     Parameters:
@@ -164,7 +303,7 @@ def build_shield(shield_config: ShieldConfiguration) -> AbstractSafetyCapability
         case RedactionConfig():
             return PiiRedactionCapability(shield_config.config)
         case GraniteGuardianConfig():
-            raise NotImplementedError("Granite Guardian capability not implemented")
+            return GraniteGuardian(shield_config.config, guardrail_point)
         case _:
             raise ValueError(
                 f"Unsupported shield config type for shield '{shield_config.name}': "
