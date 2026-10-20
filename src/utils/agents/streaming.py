@@ -445,6 +445,13 @@ async def agent_response_generator(
             logger.error("No final result received from agent run")
             return
 
+        # Fix the empty llm_response while the shield violation happens
+        if (
+            not turn_summary.llm_response
+            and dispatch_state.run_result.response.text is not None
+        ):
+            turn_summary.llm_response = dispatch_state.run_result.response.text
+
         run_result = dispatch_state.run_result
         turn_summary.token_usage = extract_agent_token_usage(
             run_result.usage,
